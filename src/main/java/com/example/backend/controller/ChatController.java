@@ -22,11 +22,15 @@ import com.example.backend.entity.Message;
 import com.example.backend.entity.User;
 import com.example.backend.repository.MessageRepository;
 import com.example.backend.repository.UserRepository;
+import com.example.backend.service.ActiveCallService;
 import com.example.backend.service.MessageService;
 import com.example.backend.service.WebSocketEventListener;
 
+import lombok.extern.slf4j.Slf4j;
+
 @RestController
 @RequestMapping("/api")
+@Slf4j
 public class ChatController {
 
     private MessageRepository messageRepository;
@@ -34,15 +38,17 @@ public class ChatController {
     private UserRepository userRepository;
     private WebSocketEventListener webSocketEventListener;
     private MessageService messageService;
+    private ActiveCallService activeCallService;
 
     public ChatController(MessageRepository messageRepository, SimpMessagingTemplate messagingTemplate,
             UserRepository userRepository, WebSocketEventListener webSocketEventListener,
-            MessageService messageService) {
+            MessageService messageService, ActiveCallService activeCallService) {
         this.messageRepository = messageRepository;
         this.messagingTemplate = messagingTemplate;
         this.userRepository = userRepository;
         this.webSocketEventListener = webSocketEventListener;
         this.messageService = messageService;
+        this.activeCallService = activeCallService;
     }
 
     @MessageMapping("/chat")
@@ -87,8 +93,30 @@ public class ChatController {
         messagingTemplate.convertAndSendToUser(caller, "/queue/call",
                 Map.of("type", "call_answered", "callee", callee, "accepted", accepted));
 
-        System.out.println(
-                "Call answered: " + callee + " " + (accepted ? "accepted" : "rejected") + " call from " + caller);
+        log.info("Call answered: {} {} call from {}", callee, (accepted ? "accepted" : "rejected"), caller);
+        if (accepted) {
+            activeCallService.startCall(caller, callee);
+            log.info("Call registered between {} and {}", caller, callee);
+        }
+    }
+
+    @MessageMapping("/call/hangup")
+    public void handleHangupCall(@Payload Map<String, String> hangupInfo, Principal principal) {
+        String hangingUpUserEmail = principal.getName();
+        String otherParticipantEmail = activeCallService.getOtherParticipant(hangingUpUserEmail);
+
+        if (otherParticipantEmail != null) {
+            log.info("{} is hanging up the call with {}", hangingUpUserEmail, otherParticipantEmail);
+            messagingTemplate.convertAndSendToUser(
+                otherParticipantEmail,
+                "/queue/call",
+                Map.of("type", "call_hungup", "hungupByUser", hangingUpUserEmail)
+            );
+            activeCallService.endCall(hangingUpUserEmail);
+            log.info("Call ended between {} and {}", hangingUpUserEmail, otherParticipantEmail);
+        } else {
+            log.warn("{} tried to hang up, but was not in an active call.", hangingUpUserEmail);
+        }
     }
 
     @GetMapping("/users")
